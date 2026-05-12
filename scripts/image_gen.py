@@ -999,6 +999,47 @@ def _extract_image_generation_results(value: Any) -> List[str]:
     return results
 
 
+def _collect_response_text_fragments(value: Any) -> List[str]:
+    fragments: List[str] = []
+    seen: set[str] = set()
+    text_keys = {"text", "message", "summary", "reason", "refusal"}
+    ignored_keys = {"input", "instructions", "tools", "tool_choice", "model", "usage", "metadata"}
+
+    def add(fragment: Any) -> None:
+        text = _non_empty_string(fragment)
+        if not text or text in seen:
+            return
+        seen.add(text)
+        fragments.append(text)
+
+    def visit(node: Any, key: Optional[str] = None) -> None:
+        if isinstance(node, dict):
+            for child_key, child in node.items():
+                if child_key in ignored_keys:
+                    continue
+                if isinstance(child, str):
+                    if child_key in text_keys or child_key == "content":
+                        add(child)
+                else:
+                    visit(child, child_key)
+        elif isinstance(node, list):
+            for child in node:
+                visit(child, key)
+        elif isinstance(node, str):
+            if key in text_keys or key == "content":
+                add(node)
+
+    visit(value)
+    return fragments
+
+
+def _format_response_text_fragments(fragments: List[str], *, limit: int = 2000) -> str:
+    text = "\n".join(fragment.strip() for fragment in fragments if fragment.strip()).strip()
+    if len(text) > limit:
+        text = text[:limit].rstrip() + "..."
+    return text
+
+
 def _redact_large_data_urls(value: Any) -> Any:
     if isinstance(value, dict):
         redacted: Dict[str, Any] = {}
@@ -1040,6 +1081,9 @@ def _call_responses_image_generation(
 
     images: List[str] = []
     seen: set[str] = set()
+    text_fragments: List[str] = []
+    text_seen: set[str] = set()
+    saw_stream_text = False
 
     def add_results(values: Iterable[str]) -> None:
         for value in values:
@@ -1047,6 +1091,14 @@ def _call_responses_image_generation(
                 continue
             seen.add(value)
             images.append(value)
+
+    def add_text(values: Iterable[str]) -> None:
+        for value in values:
+            text = _non_empty_string(value)
+            if not text or text in text_seen:
+                continue
+            text_seen.add(text)
+            text_fragments.append(text)
 
     try:
         with urlrequest.urlopen(request, timeout=600) as response:
@@ -1059,7 +1111,32 @@ def _call_responses_image_generation(
                         event = json.loads(data)
                     except json.JSONDecodeError:
                         continue
-                    add_results(_extract_image_generation_results(event))
+                    if isinstance(event, dict):
+                        event_type = _non_empty_string(event.get("type"))
+                        add_results(_extract_image_generation_results(event))
+
+                        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+                            add_text([event.get("delta")])
+                            saw_stream_text = True
+                        elif event_type in {"response.output_text.done", "response.refusal.done"}:
+                            if not saw_stream_text:
+                                add_text([event.get("text")])
+                                saw_stream_text = True
+                        elif event_type in {"response.failed", "response.incomplete", "error"}:
+                            response_obj = event.get("response")
+                            if isinstance(response_obj, dict):
+                                add_text(_collect_response_text_fragments(response_obj))
+                            else:
+                                add_text(_collect_response_text_fragments(event))
+                        elif event_type == "response.completed":
+                            if not saw_stream_text:
+                                response_obj = event.get("response")
+                                if isinstance(response_obj, dict):
+                                    add_text(_collect_response_text_fragments(response_obj))
+                                else:
+                                    add_text(_collect_response_text_fragments(event))
+                        elif not saw_stream_text and not images:
+                            add_text(_collect_response_text_fragments(event))
             else:
                 raw = response.read().decode("utf-8", errors="replace")
                 try:
@@ -1067,6 +1144,7 @@ def _call_responses_image_generation(
                 except json.JSONDecodeError:
                     _die(f"Responses API returned non-JSON response: {raw[:1000]}")
                 add_results(_extract_image_generation_results(obj))
+                add_text(_collect_response_text_fragments(obj))
     except urlerror.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         _die(f"Responses API request failed with HTTP {exc.code}: {raw[:2000]}")
@@ -1074,6 +1152,12 @@ def _call_responses_image_generation(
         _die(f"Responses API request failed: {exc}")
 
     if not images:
+        if text_fragments:
+            excerpt = _format_response_text_fragments(text_fragments)
+            _die(
+                "Responses API completed without an image_generation_call result. "
+                f"Provider returned text instead:\n{excerpt}"
+            )
         _die(
             "Responses API completed without an image_generation_call result. "
             "Verify the provider preserves the image_generation hosted tool."

@@ -1,6 +1,6 @@
 ---
 name: "imagegen6"
-description: "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use when Codex should create a brand-new image, transform an existing image, derive visual variants from references, or use the bundled API CLI. The CLI can use either the Images API or the Responses API hosted image_generation tool, resolves credentials from Codex auth/config files, and prefers Responses image_generation when no explicit image size is requested. Do not use when the task is better handled by editing SVG/vector/code-native assets or building visuals directly in HTML/CSS/canvas."
+description: "Generate or edit raster images when the task benefits from AI-created bitmap visuals such as photos, illustrations, textures, sprites, mockups, or transparent-background cutouts. Use the bundled CLI/API workflow by default when Codex should create a brand-new image, transform an existing image, derive visual variants from references, or save project assets. The CLI can use either the Images API or the Responses API hosted image_generation tool, resolves credentials from Codex auth/config files, and prefers Responses image_generation when no explicit image size is requested. Use the built-in image_gen tool only for inline preview, credential-free fallback, or built-in transparent chroma-key workflows. Do not use when the task is better handled by editing SVG/vector/code-native assets or building visuals directly in HTML/CSS/canvas."
 ---
 
 # Image Generation Skill
@@ -11,28 +11,28 @@ Generates or edits images for the current project (for example website assets, g
 
 This skill has three execution paths:
 
-- **Default built-in tool mode (preferred):** built-in `image_gen` tool for normal image generation, editing, and simple transparent-image requests. Does not require `OPENAI_API_KEY`.
-- **Responses image_generation CLI mode:** `scripts/image_gen.py generate` with `--api auto` or `--api responses`. Use this API path when the user explicitly asks for API/CLI generation and does not specify an image size. It calls `POST /v1/responses` with `{"type":"image_generation","output_format":"png"}` in `tools`.
-- **Images API CLI mode:** `scripts/image_gen.py` using `/v1/images/generations` or `/v1/images/edits`. Use this when the user explicitly asks for CLI/API/model controls that require Images API parameters, such as exact size, quality, background, masks, edit inputs, or batch generation.
+- **Default CLI/API mode (preferred):** `scripts/image_gen.py`. Use this for normal project-bound generation, edits, image references, exact output paths, batch work, and reproducible API behavior.
+- **Responses image_generation CLI mode:** `scripts/image_gen.py generate` with `--api auto` or `--api responses`. Use this when generating without an explicit image size. It calls `POST /v1/responses` with `{"type":"image_generation","output_format":"png"}` in `tools`.
+- **Images API CLI mode:** `scripts/image_gen.py` using `/v1/images/generations` or `/v1/images/edits`. Use this when exact size, quality, background, masks, edit inputs, or batch generation are required.
+- **Built-in tool fallback mode:** built-in `image_gen` tool. Use only for inline preview, when no usable CLI/API credential exists and the user accepts fallback behavior, or for the built-in-first transparent chroma-key workflow.
 
-Within CLI/API fallback, the CLI exposes three subcommands:
+Within default CLI/API mode, the CLI exposes three subcommands:
 
 - `generate`
 - `edit`
 - `generate-batch`
 
 Rules:
-- Use the built-in `image_gen` tool by default for normal image generation and editing requests.
-- Do not switch to CLI fallback for ordinary quality, size, or file-path control unless the user explicitly asks for CLI/API/model execution.
-- When CLI/API generation is explicitly requested and the user does not specify `--size` or Images-only controls, prefer `scripts/image_gen.py generate --api auto` so the script uses the Responses API hosted `image_generation` tool.
+- Use `scripts/image_gen.py` by default for normal image generation and editing requests.
+- For generation without explicit dimensions, use `scripts/image_gen.py generate --api auto` so the script uses the Responses API hosted `image_generation` tool.
 - Use `--api images` or supply `--size` when exact image dimensions are required; the Responses hosted tool path intentionally does not send a size parameter.
 - Treat the labeled prompt lines in this skill as prompt text, not CLI flags. Map them only to the documented options in `references/cli.md`; do not invent flags such as `--asset-type`.
 - If the user explicitly asks for a transparent image/background, stay on built-in `image_gen` first: prompt for a flat removable chroma-key background, then remove it locally with the installed helper at `${CODEX_HOME:-$HOME/.codex}/skills/imagegen6/scripts/remove_chroma_key.py`.
 - Never silently switch from built-in `image_gen` or CLI `gpt-image-2` to CLI `gpt-image-1.5`. Treat this as a model/path downgrade and ask the user before doing it, unless the user has already explicitly requested `gpt-image-1.5`, `scripts/image_gen.py`, or CLI fallback.
 - If a transparent request appears too complex for clean chroma-key removal, asks for true/native transparency, or local removal fails validation, explain that true transparency requires CLI `gpt-image-1.5 --background transparent --output-format png` because `gpt-image-2` does not support `background=transparent`, then ask whether to proceed. Run the CLI fallback only after the user confirms.
-- The word `batch` by itself does not mean CLI fallback. If the user asks for many assets or says to batch-generate assets without explicitly asking for CLI/API/model controls, stay on the built-in path and issue one built-in call per requested asset or variant.
-- If the built-in tool fails or is unavailable, tell the user the CLI/API fallback exists and that it requires a Codex auth token, a Codex `OPENAI_API_KEY`, or env `OPENAI_API_KEY`. Proceed only if the user explicitly asks for that fallback.
-- If the user explicitly asks for CLI/API mode, use the bundled `scripts/image_gen.py` workflow. Do not create one-off SDK runners.
+- The word `batch` means CLI mode when the user wants saved deliverables or reproducible generation. Use `generate-batch` for many different prompts; use `--n` only for variants of one prompt.
+- If CLI/API credentials are missing, tell the user the built-in `image_gen` fallback exists and does not require local credentials. Proceed with built-in fallback only if the user accepts fallback behavior or only needs inline preview.
+- Use the bundled `scripts/image_gen.py` workflow. Do not create one-off SDK runners.
 - Never modify `scripts/image_gen.py`. If something is missing, ask the user before doing anything else.
 
 Built-in save-path policy:
@@ -48,7 +48,7 @@ Built-in save-path policy:
 
 Shared prompt guidance for all modes lives in `references/prompting.md` and `references/sample-prompts.md`.
 
-Fallback-only docs/resources for CLI mode:
+CLI/API docs/resources:
 - `references/cli.md`
 - `references/image-api.md`
 - `references/codex-network.md`
@@ -96,7 +96,7 @@ Execution strategy:
 Assume the user wants a new image unless they clearly ask to change an existing one.
 
 ## Workflow
-1. Decide the execution path: built-in by default, including simple transparent-output requests; CLI/API only if explicitly requested or after the user explicitly confirms a transparent-output fallback.
+1. Decide the execution path: CLI/API by default; use built-in `image_gen` only for inline preview, accepted credential-free fallback, or the built-in-first transparent chroma-key workflow.
 2. Decide the intent: `generate` or `edit`.
 3. Decide whether the output is preview-only or meant to be consumed by the current project.
 4. Decide the execution strategy: single asset vs repeated built-in calls vs CLI `generate-batch`.
@@ -105,19 +105,19 @@ Assume the user wants a new image unless they clearly ask to change an existing 
    - reference image
    - edit target
    - supporting insert/style/compositing input
-7. If the edit target is only on the local filesystem and you are staying on the built-in path, inspect it with `view_image` first so the image is available in conversation context.
-8. If the user asked for a photo, illustration, sprite, product image, banner, or other explicitly raster-style asset, use `image_gen` rather than substituting SVG/HTML/CSS placeholders. If the request is for an icon, logo, or UI graphic that should match existing repo-native SVG/vector/code assets, prefer editing those directly instead.
+7. If the edit target is on the local filesystem, prefer CLI/API `edit` or Responses `--input-image`; inspect with `view_image` only when you intentionally choose built-in fallback.
+8. If the user asked for a photo, illustration, sprite, product image, banner, or other explicitly raster-style asset, use the CLI/API workflow rather than substituting SVG/HTML/CSS placeholders. If the request is for an icon, logo, or UI graphic that should match existing repo-native SVG/vector/code assets, prefer editing those directly instead.
 9. Augment the prompt based on specificity:
    - If the user's prompt is already specific and detailed, normalize it into a clear spec without adding creative requirements.
    - If the user's prompt is generic, add tasteful augmentation only when it materially improves output quality.
-10. Use the built-in `image_gen` tool by default.
+10. Use `scripts/image_gen.py` by default.
 11. For transparent-output requests, follow the transparent image guidance below: generate with built-in `image_gen` on a flat chroma-key background, copy the selected output into the workspace or `tmp/imagegen/`, run the installed `${CODEX_HOME:-$HOME/.codex}/skills/imagegen6/scripts/remove_chroma_key.py` helper, and validate the alpha result before using it. If this path looks unsuitable or fails, ask before switching to CLI `gpt-image-1.5`.
 12. Inspect outputs and validate: subject, style, composition, text accuracy, and invariants/avoid items.
 13. Iterate with a single targeted change, then re-check.
 14. For preview-only work, render the image inline; the underlying file may remain at the default `$CODEX_HOME/generated_images/...` path.
 15. For project-bound work, move or copy the selected artifact into the workspace and update any consuming code or references. Never leave a project-referenced asset only at the default `$CODEX_HOME/generated_images/...` path.
 16. For batches or multi-asset requests, persist every requested deliverable final in the workspace unless the user explicitly asked to keep outputs preview-only. Discarded variants do not need to be kept unless requested.
-17. If the user explicitly chooses or confirms CLI/API fallback, then use the fallback-only docs for Responses hosted `image_generation`, Images API model, quality, size, `input_fidelity`, masks, output format, output paths, and network setup.
+17. Use the CLI/API docs for Responses hosted `image_generation`, Images API model, quality, size, `input_fidelity`, masks, output format, output paths, and network setup.
 18. Always report the final saved path(s) for any workspace-bound asset(s) as both a Markdown link and a normalized `file:///...` URI, plus the final prompt or prompt set and whether built-in, Responses API, or Images API mode was used.
 
 ## Transparent image requests
