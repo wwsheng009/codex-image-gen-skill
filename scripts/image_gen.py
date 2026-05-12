@@ -128,6 +128,23 @@ def _first_existing_codex_file(filename: str) -> Optional[Path]:
     return None
 
 
+def _resolve_auth_credentials() -> Tuple[Optional[Path], Optional[str], Optional[str]]:
+    """Find the first usable auth file, then fall back to the environment."""
+    for directory in _candidate_codex_dirs():
+        path = directory / "auth.json"
+        if not path.exists() or not path.is_file():
+            continue
+        api_key, auth_source = _read_auth_file(path)
+        if api_key:
+            return path, api_key, auth_source
+
+    api_key = _non_empty_string(os.getenv("OPENAI_API_KEY"))
+    if api_key:
+        return None, api_key, "env:OPENAI_API_KEY"
+
+    return None, None, None
+
+
 def _parse_simple_toml(text: str) -> Dict[str, Any]:
     """Parse the simple Codex config shape needed when tomllib is unavailable."""
     root: Dict[str, Any] = {}
@@ -195,6 +212,46 @@ def _read_codex_config(path: Path) -> Tuple[Optional[str], Optional[str], Option
     return base_url, model, reasoning_effort
 
 
+def _resolve_codex_config() -> Tuple[Optional[Path], Optional[str], Optional[str], Optional[str]]:
+    """Resolve config values by walking all candidate config files in order.
+
+    This lets a project-local config contribute fields it actually defines while
+    still falling back to the user's home config for missing provider settings.
+    """
+    config_path: Optional[Path] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+
+    for directory in _candidate_codex_dirs():
+        path = directory / "config.toml"
+        if not path.exists() or not path.is_file():
+            continue
+
+        current_base_url, current_model, current_reasoning_effort = _read_codex_config(path)
+        if (
+            current_base_url is None
+            and current_model is None
+            and current_reasoning_effort is None
+        ):
+            continue
+
+        if config_path is None:
+            config_path = path
+
+        if base_url is None and current_base_url is not None:
+            base_url = current_base_url
+        if model is None and current_model is not None:
+            model = current_model
+        if reasoning_effort is None and current_reasoning_effort is not None:
+            reasoning_effort = current_reasoning_effort
+
+        if base_url is not None and model is not None and reasoning_effort is not None:
+            break
+
+    return config_path, base_url, model, reasoning_effort
+
+
 def _read_auth_file(path: Path) -> Tuple[Optional[str], Optional[str]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -217,18 +274,8 @@ def _read_auth_file(path: Path) -> Tuple[Optional[str], Optional[str]]:
 
 
 def _resolve_openai_connection(*, dry_run: bool = False) -> OpenAIConnection:
-    auth_path = _first_existing_codex_file("auth.json")
-    config_path = _first_existing_codex_file("config.toml")
-
-    api_key = None
-    auth_source = None
-    if auth_path:
-        api_key, auth_source = _read_auth_file(auth_path)
-
-    if not api_key:
-        api_key = _non_empty_string(os.getenv("OPENAI_API_KEY"))
-        if api_key:
-            auth_source = "env:OPENAI_API_KEY"
+    auth_path, api_key, auth_source = _resolve_auth_credentials()
+    config_path, base_url, config_model, config_reasoning_effort = _resolve_codex_config()
 
     if not api_key and not dry_run:
         searched = ", ".join(str(p / "auth.json") for p in _candidate_codex_dirs())
@@ -238,12 +285,6 @@ def _resolve_openai_connection(*, dry_run: bool = False) -> OpenAIConnection:
         )
     if not api_key and dry_run:
         _warn("No OpenAI credential found; continuing because this is a dry-run.")
-
-    base_url = None
-    config_model = None
-    config_reasoning_effort = None
-    if config_path:
-        base_url, config_model, config_reasoning_effort = _read_codex_config(config_path)
 
     return OpenAIConnection(
         api_key=api_key,
